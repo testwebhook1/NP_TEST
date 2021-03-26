@@ -1,0 +1,528 @@
+install_msssql.yml
+---
+- hosts: win_sql
+  vars_files:
+  #- ~/mss_dbmw_sql_install/vars/vars_np.yml
+  vars:
+    sql_version: '2017x1'
+    sql_edition: 'standardx2'
+    instance_name: 'SQLx3'
+    rboot: false 
+    dbmw: "N"
+    install_cleanup: 'Y'
+
+    ssms_download_url: "dummy_value"
+  gather_facts: yes
+ # remote_user: root
+ # become: yes
+ # become_method: runas
+#  become_user: true
+  roles:
+#    - mssql_prereqs
+    - roles/mss_dbmw_sql_ssms
+    - roles/mss_dbmw_sql_install
+    - { role: roles/mss_dbmw_sql_install_cleanup, when: install_cleanup == 'Y' }
+
+****
+--
+---
+# tasks file for mss_dbmw_sql_ssms
+- name: "SSMS will be install on {{ ansible_hostname }} "
+  debug:
+    msg: " host name {{ ansible_hostname }} "
+  
+- name: create a directory for {{ installation_path }} installation files folder
+  win_file:
+    path: "{{ installation_path }}"
+    state: directory
+
+- name: "copy from {{ ssms_download_url }}SSMS\ "
+  win_robocopy:
+    src: '{{ ssms_download_url }}SSMS\'     ## SSMS-Setup-ENU.exe
+    remote_src: yes
+#      dest: '{{ installation_path_cu }}'
+    dest: '{{ installation_path }}'
+  become: yes
+  become_method: runas
+- name: execute {{ installation_path }}SSMS-Setup-ENU.exe
+  win_command: '{{ installation_path }}SSMS-Setup-ENU.exe /install /quiet /norestart'
+#  become: yes
+#  become_method: runas
+  register: install_status
+  ignore_errors: yes
+  
+- name: install_result of SSMS failure check
+  fail: 
+    msg: " SSMS install failed {{ install_status.failed }} - {{ install_status.stderr }}   may be reboot pending - here flag will no help so reboot manually"
+  when: install_status.rc !=0 and install_status.rc != 1603
+
+- name: install_result rc = 0 
+  debug: 
+    msg: "SSMS installed on {{ ansible_hostname }}"
+  when: install_status.rc ==0 
+- name: install_result rc = 1603
+  debug: 
+    msg: "SSMS same version looks like exists on {{ ansible_hostname }}"
+  when: install_status.rc == 1603
+
+****
+--download_software.yml---
+#  by Nilesh Patel
+#  download_software
+#  download SqlServer.zip from url as per version edition 
+#  unzip to installation_path
+- name: "what will be install on {{ ansible_hostname }} "
+  debug:
+    msg: " Insance name- {{ instance_name }} : SQL version- {{ sql_version }} : SQL edition- {{ sql_edition }} : {{ mssql_download_url }}"
+  
+- name: create a directory for {{ installation_path }} installation files folder
+  win_file:
+    path: "{{ installation_path }}"
+    state: directory
+- name: create a directory for {{ download_path }} download path
+  win_file:
+    path: "{{ download_path }}"
+    state: directory
+
+- name: check downloaded file exists
+  win_stat:
+    path: "{{ download_path }}SQLServer.zip"
+  register: installer_file
+
+- name: Get MSSQL installer
+  win_get_url:
+    url: "{{ mssql_download_url }}"
+    dest: "{{ download_path }}SQLServer.zip"
+  when: not installer_file.stat.exists
+
+- name: check downloaded file exists
+  win_stat:
+    path: "{{ installation_path }}setup.exe"
+  register: setup_file
+
+- name: extract from SQLServer.zip file
+  win_unzip:
+    src: "{{ download_path }}SQLServer.zip"
+    dest: "{{ installation_path }}"
+  when: not setup_file.stat.exists
+
+# C:\Program Files (x86)\Microsoft SQL Server\DReplayClient\ResultDir & WorkingDir must exists for SQL 2019
+- name: install 2 directory for SQL 2019 Microsoft SQL Server\DReplayClient\ResultDir
+  win_file:
+    path: 'C:\Program Files (x86)\Microsoft SQL Server\DReplayClient\ResultDir'
+    state: directory
+  when: sql_version=='2019'
+- name: install 2 directory for SQL 2019 Microsoft SQL Server\DReplayClient\WorkingDir
+  win_file:
+    path: 'C:\Program Files (x86)\Microsoft SQL Server\DReplayClient\WorkingDir'
+    state: directory
+  when: sql_version=='2019'
+- name: copy latest CU from  {{ ssms_download_url }} CU_SQL{{ sql_version }}\ 
+  win_robocopy:
+    src: '{{ ssms_download_url }}CU_SQL{{ sql_version }}\'
+    remote_src: yes
+    dest: '{{ installation_path }}Updates\'
+  become: yes
+  become_method: runas
+
+****
+-- disable_CEIP_service.yml---
+#  by Nilesh Patel
+# disable services SQLTELEMETRY$SQL_2017A or SQLTELEMETRY or SSASTELEMETRY  or SSASTELEMETRY$SQL_2017A
+- name: " win services SQLTELEMETRY disabled and stopped"
+  win_service:
+    name: SQLTELEMETRY
+    start_mode: disabled
+    state: stopped
+  when: instance_name == "MSSQLSERVER" ## and instance_name != "default"
+- name: " win services SSASTELEMETRY disabled and stopped"
+  win_service:
+    name: SSASTELEMETRY
+    start_mode: disabled
+    state: stopped
+  when: instance_name == "MSSQLSERVER" ## and instance_name != "default"
+
+- name:  " win services SQLTELEMETRY${{ instance_name }} disabled and stopped"
+  win_service:
+    name: SQLTELEMETRY${{ instance_name  }}
+    start_mode: disabled
+    state: stopped
+  when: instance_name != "MSSQLSERVER" ## and instance_name != "default"
+- name:  " win services SSASTELEMETRY${{ instance_name }} disabled and stopped"
+  win_service:
+    name: SSASTELEMETRY${{ instance_name  }}
+    start_mode: disabled
+    state: stopped
+  when: instance_name != "MSSQLSERVER" ## and instance_name != "default"
+
+****
+-- main.yml install
+---
+# tasks file for mss_dbmw_sql_install
+#
+# Install SQL 
+#
+- import_tasks: prompt_validation.yml
+- import_tasks: check_instance_exists.yml
+- import_tasks: validate_runas.yml
+#- import_tasks: ~/mss_dbmw_sql_install/tasks/mssql_prereqs.yml
+- import_tasks: download_software.yml
+
+# SQL install may fail if a pending reboot is detected
+# Assuming we are allowed to reboot this step will check for pending reboots
+# and execute a reboot, reboot activity can be controlled using the variable mssql_suppress_reboot
+
+- set_fact:
+    agentact_v: 'NT Service\SQLAgent${{ instance_name }}'
+    sqlact_v: 'NT Service\MSSQL${{ instance_name }}'
+    asact_v: 'NT Service\MSOLAP${{ instance_name }}'
+    ftact_v: 'NT Service\MSSQLFDLauncher${{ instance_name }}'
+    asteleact_v: 'NT Service\SSASTELEMETRY${{ instance_name }}'
+    sqlteleact_v: 'NT Service\SQLTELEMETRY${{ instance_name }}' 
+    rsact_v: 'NT Service\ReportServer${{ instance_name }}'
+  when: instance_name != "MSSQLSERVER" ## and instance_name != "default"
+  
+- name: "what will be used for SQL services for {{ instance_name }} "
+  debug:
+    msg: " Insance name- {{ instance_name }} : SQL  {{ sqlact_v }} : SQL agent- {{ agentact_v }} : SSAS- {{ asact_v }} : FDL- {{ ftact_v }} : asTele- {{ asteleact_v }} : Tele- {{ sqlteleact_v }} "
+# reason to skip below as on new VM no SQLCMD available -- need more research by Nilesh
+#- name: insert  playbook info in table
+#  include_role:
+#    name: roles/mss_dbmw_sql_log_insert
+#  vars:
+#    ok_flag: 'requested'
+#    playbook_name: 'role:mss_dbmw_sql_install'
+#    SQLname: '{{ ansible_hostname }}'
+#    SQLDBname: 'NA'
+#    SQLLoginname: 'NA' 
+#    Parm1: 'instancename: {{ instance_name }}'
+#    Parm2: 'sql_version : {{ sql_version  }}'
+#    Parm3: 'sql_edition : {{ sql_edition  }}'
+#    Parm4: 'dbmw : {{ dbmw  }}'
+#    Parm5: 'rboot : {{ rboot  }}'
+    
+- name: wait reboot windows
+  win_reboot:
+    reboot_timeout: 3600
+    post_reboot_delay: 60
+  when: rboot 
+
+
+- meta: flush_handlers
+
+- name: "win command whoami"
+  win_command: "whoami"
+  become: yes
+  become_method: runas
+  register: output1
+- name: "print output1"
+  debug:
+    msg: "{{ output1 }}"
+- name: create the configuration file
+  win_template:
+    src: mssql_conf_template_{{ sql_version }}.j2
+    dest: "{{ installation_path_setup }}/sql_conf.ini"
+- name: "print ansible_become_user"
+  debug:
+    msg: "{{ ansible_become_user }}" ## {{ ansible_become_password }}"
+
+- name: install with psexec with runas {{ ansible_become_user }}
+  win_psexec:
+    command: '{{ installation_path_setup }}setup.exe /SAPWD="M00dys123" /ConfigurationFile={{ installation_path_setup }}sql_conf.ini'
+  become: yes
+  become_method: runas
+  ignore_errors: yes
+  register: install_status1
+- name: install_result1
+  debug: 
+    msg: rc {{ install_status1.rc }} failed {{ install_status1.failed }} - {{ install_status1.stderr_lines }}
+
+- name: insert  playbook info in table
+  include_role:
+    name: roles/mss_dbmw_sql_log_insert
+  vars:
+    ok_flag: "{{ 'OK' if install_status1.rc == 3010 or install_status1.rc == 0 else 'FAIL' }}"
+    playbook_name: 'role:mss_dbmw_sql_install'
+    SQLname: '{{ ansible_hostname }}'
+    SQLDBname: 'NA'
+    SQLLoginname: 'NA' 
+    Parm1: 'instancename: {{ instance_name }}'
+    Parm2: 'sql_version : {{ sql_version  }}'
+    Parm3: 'sql_edition : {{ sql_edition  }}'
+    Parm4: 'dbmw : {{ dbmw  }}'
+    Parm5: 'rboot : {{ rboot  }}'
+    outputfile: "\\{{ ansible_hostname }}\\c$\\Program Files\\Microsoft SQL Server\\xxx\\Setup Bootstrap\\Log "
+
+
+- name: install_result1 check already exist failuer
+  debug: 
+    msg: rc {{ install_status1.rc }} No features were installed during the setup execution. The requested features may already be installed
+  when: install_status1.rc == 2068643838 or install_status1.rc == 2226323458
+
+- name: install_result1 check OS resource issue to start service but install completed
+  debug: msg= rc {{ install_status1.rc }} Services could not start due to resources ( need to stop older service and start new service ) but installation completed
+  when: install_status1.rc == 2146232832
+- name: install_result1 delegation account not have enough permission or not used properly 
+  debug: msg= rc {{ install_status1.rc }} delegation account not have enough permission or not used properly
+  when: install_status1.rc == 2068774911
+
+- name: applying post build for dbmw Y parameter
+#  import_tasks: ~/mss_dbmw_sql_install/tasks/post_build_setup.yml
+  import_tasks: post_build_setup.yml
+  when: dbmw == "Y" and ( install_status1.rc == 3010 or install_status1.rc == 0)
+- name: Disable CEIP services
+  import_tasks: disable_CEIP_services.yml
+  when: install_status1.rc == 3010 or install_status1.rc == 0
+
+- name: reboot required to complete installation  if rc code 3010 - return code {{ install_status1.rc }}
+  win_reboot:
+    reboot_timeout: 3600
+    post_reboot_delay: 60
+  when: install_status1.rc == 3010
+
+- name: "Install status on {{ ansible_hostname }} "
+  debug:
+    msg: " SUCCESS :: Instance name- {{ instance_name }} : SQL version- {{ sql_version }} : SQL edition- {{ sql_edition }} : {{ mssql_download_url }} on OS {{ ansible_distribution }} "
+  when: ( install_status1.rc == 3010 or install_status1.rc == 0)
+
+- name: "check error info if installation fail "
+  debug:
+    msg: "\\{{ ansible_hostname }}\\c$\\Program Files\\Microsoft SQL Server\\xxx\\Setup Bootstrap\\Log "
+
+- name: install_result1 check failed due to reboot pending 
+  fail: 
+    msg: rc {{ install_status1.rc }} reboot pending so try again with rboot=true in parameter 
+  when: install_status1.rc == 2067919934
+
+- name:   install failed msg {{ instance_name }}
+  fail: 
+    msg: " FAILED :: {{ install_status1.stderr_lines }} Instance name- {{ instance_name }} : SQL version- {{ sql_version }} : SQL edition- {{ sql_edition }} : {{ mssql_download_url }} on OS {{ ansible_distribution }} "
+#  when: NOT ( install_status1.rc == 3010 or install_status1.rc == 0)
+  when: ( install_status1.rc != 3010 and install_status1.rc != 0)
+
+
+# E:\SQLSoftware\SQL_2019_Enterprise   Setup.exe /SAPWD="****" /ConfigurationFile=C:\ConfigurationFile\ConfigurationFile.ini
+#- name: execute {{ installation_path_setup }}\setup.exe
+#  win_command: '{{ installation_path_setup }}\setup.exe /SAPWD="M00dys123" /ConfigurationFile={{ installation_path_setup }}\ConfigurationFile_2019'
+# other option but same result 
+# PSEXEC AND COMMAND both working
+#- name: execute {{ installation_path_setup }}\setup.exe
+#  win_command: '{{ installation_path_setup }}setup.exe /SAPWD="M00dys123" /ConfigurationFile={{ installation_path_setup }}sql_conf.ini'
+#  become: yes
+#  become_method: runas
+#  register: install_status
+#- name: install_result
+#  debug: msg= {{ install_status.failed }} - {{ install_status.stderr }}
+
+
+
+
+****
+-- execute ddldml
+---
+#  by Nilesh Patel
+# for DBMW supported SQL instance need to execute script of mss_dbmw_sql_execute_ddl_dml
+# servername, user DB name, script file (with path), to_email  values expected from tower job template
+- set_fact:
+    one_file: "{{ installation_path_setup }}{{ servername }}_{{ ansible_date_time.date }}_{{ ansible_date_time.epoch }}_{{ userdbname }}_{{ source_script }}" 
+
+
+- name: check envirnment fo SQL {{ servername }} vs tower template - {{ asb_tower }}
+  include_role:
+    name: roles/mss_dbmw_sql_env_checks
+
+- name: check DB opened 
+  win_command: sqlcmd -S {{ servername }} -d {{ userdbname }} -Q "select @@servername "
+  become: yes
+  become_method: runas
+  register: sqlcmd_out1
+  ignore_errors: yes
+
+- name: sqlcmd out1 
+  fail:  
+    msg: Database is not opened or may not have access or may not exist expected {{ servername }} - {{ userdbname }}
+  when: sqlcmd_out1.rc != 0
+
+- name: create a directory for {{ installation_path_setup }} installation files folder
+  win_file:
+    path: "{{ installation_path_setup }}"
+    state: directory
+
+- name: 'copy remote script to ansible node from {{ source_path }}{{ source_script }}'
+  win_copy:
+#    src: '{{ source_path }}{{ source_script }}'
+    src: '{{ source_path }}{{ source_script }}'
+    remote_src: yes
+    dest: "{{ one_file }}.sql"
+  become: yes
+  become_method: runas
+
+- name: "{{ one_file }}.sql  script Execution for names instance {{ servername }} "
+  win_command: sqlcmd -S {{ servername }} -d {{ userdbname }} -i "{{ one_file }}.sql" -v {{ cmdparm1 }} {{ cmdparm2 }} {{ cmdparm3 }} -m-1 -b -o "{{ one_file }}_out.txt"
+  ignore_errors: yes
+  become: yes
+  become_method: runas
+  register: sqlcmd_out
+
+- set_fact:
+    ok_flag: "{{ 'OK' if sqlcmd_out.rc == 0 else 'FAIL' }}"
+
+- name: insert  playbook info in table
+  include_role:
+    name: roles/mss_dbmw_sql_log_insert
+  vars:
+    playbook_name: 'role:mss_dbmw_sql_execute_ddl_dml'
+    SQLname: '{{ servername }}'
+    SQLDBname: '{{ userdbname }}'
+    SQLLoginname: 'NA'
+    Parm1: '{{ to_email }}'
+    Parm2: '{{ source_script }}'
+    Parm3: 'RITM : {{ cmdbritm }}'
+    Parm4: ' -v {{ cmdparm1 }} {{ cmdparm2 }} {{ cmdparm3 }}'
+#    Parm8: '{{ towerenv }}'
+    outputfile: 'on {{ ansible_hostname }} {{ one_file }}_out.txt'
+- name: Pass variables to role
+  include_role:
+    name: roles/mss_dbmw_sql_send_email
+  vars:
+    att_path: "{{ one_file }}_out.txt"
+
+- name: sqlcmd out
+  fail:  
+    msg: there is/are error(s) in execution of script on {{ servername }} - {{ userdbname }} Please check outout on {{ ansible_hostname }} {{ one_file }}_out.txt
+  when: sqlcmd_out.rc != 0
+  
+  
+  *****
+  -- post build A1
+  
+  ---
+# tasks file for mss_dbmw_sql_dbmw_A1
+# post build to do for service account and port number change after build
+# Nilesh patel 1/22/2021
+
+- set_fact:
+#    sql_file: "{{ installation_path_setup }}{{ Logservername }}_{{ ansible_date_time.date }}_{{ ansible_date_time.epoch }}_log" 
+    ps_out: '{{ asb_output_location }}{{ ansible_hostname }}_{{ instance_name }}_services_out.txt'
+
+- name: "post build part A1 setup on {{ ansible_hostname }} {{ ps_out }}"
+  debug:
+    msg: " host name {{ ansible_hostname }} "
+
+
+- name: create a directory for {{ installation_path }} installation files folder
+  win_file:
+    path: "{{ installation_path }}"
+    state: directory
+
+- name: copy PS file for service account and port number 
+  win_template:
+    src: service_account_change.j2
+    dest: "{{ installation_path }}/service_account_change.ps1"
+
+- name: execute {{ installation_path }}service_account_change.ps1
+  win_shell: '{{ installation_path }}service_account_change.ps1 > {{ ps_out }}'  ## {{ asb_output_location }}_{{ ansible_hostname }}_{{ instance_name }}_services_out.txt'
+  become: yes
+  become_method: runas
+  register: install_status
+  ignore_errors: yes
+
+
+- set_fact:
+    ok_flag: "{{ 'OK' if install_status.rc == 0 else 'FAIL' }}"
+
+- name: insert  playbook info in table
+  include_role:
+    name: roles/mss_dbmw_sql_log_insert
+  vars:
+    installation_path_setup: '{{ installation_path }}'
+    playbook_name: 'role:mss_dbmw_sql_post_dbmw_A1'
+    SQLname: '{{ ansible_hostname }}'
+    SQLDBname: '{{ instance_name }}'
+    SQLLoginname: 'Tower ansible_become_user '
+    Parm1: 'service account {{ service_account }}'
+    Parm2: 'TCPPort {{ TCPPort }}'
+    
+    outputfile: 'on {{ ps_out }}'
+
+
+- name: install_result of service_account_change.ps1 failure check
+  fail: 
+    msg: " service_account_change.ps1 failed  {{ install_status.failed }} - {{ install_status.stderr }}  "
+  when: install_status.rc !=0 ## and install_status.rc != 1603
+
+- name: install_result rc = 0 
+  debug: 
+    msg: "service_account_change.ps1 execute successfully on {{ ansible_hostname }}"
+  when: install_status.rc ==0 
+#- name: install_result rc = 1603
+#  debug: 
+#    msg: "SSMS same version looks like exists on {{ ansible_hostname }}"
+#  when: install_status.rc == 1603
+- name: Remove service file " {{ installation_path }}service_account_change.ps1 "
+  win_file:
+    path: "{{ installation_path }}service_account_change.ps1"
+    state: absent
+
+
+-- insert log sql template
+USE [MDYMIT_DBs]
+GO
+
+INSERT INTO [dbo].[asb_mssql_playbook_log]
+           ([playbook_name]
+           ,[Ranby]
+           ,[ok_flag]
+           ,[SQLname]
+           ,[SQLDBname]
+           ,[SQLLoginname]
+           ,[Parm1]
+           ,[Parm2]
+           ,[Parm3]
+           ,[Parm4]
+           ,[Parm5]
+           ,[Parm6]
+           ,[Parm7]
+           ,[Parm8], [outputfile], [asb_tower] )
+     VALUES
+           ( '{{ playbook_name }}' 
+           , '{{ Ranby }} '
+           , '{{ok_flag }}'
+           , '{{ SQLname }}'
+           , '{{ SQLDBname }}'
+           , '{{ SQLLoginname }}'
+           , '{{ Parm1 }}'
+           , '{{ Parm2 }}'
+           , '{{ Parm3 }}'
+           , '{{ Parm4 }}'
+           , '{{ Parm5 }}'
+           , '{{ Parm6 }}'
+           , '{{ Parm7 }}'
+           , '{{ Parm8 }}'
+           , '{{ outputfile }}' , '{{ asb_tower }}')
+GO
+
+*****
+-- email sql template
+declare @tableHTML varchar(max), @subject varchar(200), @att_path varchar(3000)
+SET @tableHTML = '<table border="1" >' +    
+'<tr > Dear Team, </tr><tr> Please find execution output for server {{ Logservername }} </tr>
+<tr>Regards,</tr><tr>SQL Server team</tr></table>'
+
+select @att_path = '{{ att_path }}'
+select @subject='<Ansible output> - {{ ok_flag }} - {{ att_path }}'
+
+EXEC msdb.dbo.sp_send_dbmail      
+     @recipients='{{ to_email }}',
+  	 @copy_recipients='{{ cc_email }}',    
+	 @subject = @subject,    
+	 @body = @tableHTML,    
+	 @body_format = 'HTML' ,
+	 @file_attachments = @att_path;
+	 
+	 
+****
+--
+
+	 
+
